@@ -103,27 +103,37 @@ def test_judge_win_rate_accepts_a_choice_followed_by_explanation(monkeypatch):
     assert evaluate.judge_win_rate(["A complete prediction"], ["A short reference"], [example()], config) == 1.0
 
 
-def test_lm_eval_uses_mps_when_cuda_is_unavailable(tmp_path, monkeypatch):
+def test_lm_eval_uses_cpu_when_cuda_is_unavailable(tmp_path, monkeypatch):
     model_dir = tmp_path / "adapter"
     model_dir.mkdir()
-    (model_dir / "adapter_config.json").write_text(
-        json.dumps({"base_model_name_or_path": "test/base-model"}),
-        encoding="utf-8",
-    )
+    base_model = "test/base-model"
+    (model_dir / "adapter_config.json").write_text(json.dumps({
+        "base_model_name_or_path": base_model,
+    }), encoding="utf-8")
     test_data = tmp_path / "test.jsonl"
     test_data.write_text("", encoding="utf-8")
-    commands = []
+    calls = []
+
+    def run_cpu_harness(base, adapter, task_dir, output_path):
+        task_yaml = (task_dir / "curate_eval.yaml").read_text(encoding="utf-8")
+        calls.append((base, adapter, task_yaml, output_path))
+
     monkeypatch.setattr(ablation.shutil, "which", lambda _: "/usr/bin/lm_eval")
-    monkeypatch.setattr(ablation.subprocess, "run", lambda command, check: commands.append(command))
+    monkeypatch.setattr(ablation, "_run_lm_eval_on_cpu", run_cpu_harness)
     monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(
         cuda=SimpleNamespace(is_available=lambda: False),
         backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: True)),
     ))
 
-    ablation.run_lm_eval(model_dir, str(test_data), tmp_path / "lm_eval.json")
+    output_path = tmp_path / "lm_eval.json"
+    ablation.run_lm_eval(model_dir, str(test_data), output_path)
 
-    model_args = commands[0][commands[0].index("--model_args") + 1]
-    assert model_args == f"pretrained=test/base-model,peft={model_dir.resolve()},device=mps"
+    assert len(calls) == 1
+    base, adapter, task_yaml, output = calls[0]
+    assert base == base_model
+    assert adapter == model_dir.resolve()
+    assert str(test_data.resolve()) in task_yaml
+    assert output == output_path
 
 
 def test_minhash_detects_near_duplicate_above_jaccard_threshold():

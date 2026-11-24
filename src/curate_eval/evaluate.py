@@ -34,19 +34,23 @@ def generate(model_path: str, examples: list[Example], max_new_tokens: int) -> t
     if not examples:
         raise ValueError("Evaluation data contains no examples")
     tokenizer = AutoTokenizer.from_pretrained(model_path)
+    if torch.cuda.is_available():
+        device = "cuda"
+        model_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    else:
+        device = "cpu"
+        model_dtype = None
+    model_kwargs = {"torch_dtype": model_dtype} if model_dtype is not None else {}
+    if model_kwargs:
+        model_kwargs["low_cpu_mem_usage"] = True
     adapter_config = Path(model_path) / "adapter_config.json"
     if adapter_config.is_file():
         with adapter_config.open(encoding="utf-8") as handle:
             base_model = json.load(handle)["base_model_name_or_path"]
-        model = AutoModelForCausalLM.from_pretrained(base_model)
+        model = AutoModelForCausalLM.from_pretrained(base_model, **model_kwargs)
         model = PeftModel.from_pretrained(model, model_path)
     else:
-        model = AutoModelForCausalLM.from_pretrained(model_path)
-    device = (
-        "cuda" if torch.cuda.is_available()
-        else "mps" if torch.backends.mps.is_available()
-        else "cpu"
-    )
+        model = AutoModelForCausalLM.from_pretrained(model_path, **model_kwargs)
     model.to(device)
     predictions: list[str] = []
     total_negative_log_likelihood = 0.0

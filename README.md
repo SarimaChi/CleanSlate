@@ -135,7 +135,10 @@ The runner caches unfiltered synthetic candidates separately so a filtering/trai
 doesn't spend again on generation. `runs/ablation/ablation_summary.json` records the fixed
 training configuration, per-arm training device/dtype/token throughput, and dataset sizes.
 CUDA training uses bf16 when supported, otherwise fp16; CPU/MPS uses fp32. The Mac MPS
-smoke run was extremely slow, so use a Kaggle or Colab GPU for full training.
+full-data run was extremely slow, so use a Kaggle or Colab GPU for full training. MPS
+inference hit a native Metal 4 GiB temporary-array limit on this machine; evaluation uses
+CPU when CUDA is unavailable. CPU lm-evaluation-harness loads the base model and adapter
+before wrapping the model so PEFT cannot silently place it on MPS.
 
 ### Kaggle / Colab GPU run
 
@@ -158,8 +161,8 @@ all arms, saves LoRA adapters and metrics under `runs/ablation/gpu/`, and runs t
 lm-evaluation-harness task plus ROUGE-L, BLEU, perplexity, and OpenRouter judge win rates.
 Override `DATA_DIR`, `OUTPUT_DIR`, `BASE_MODEL`, or `JUDGE_MODEL` as needed.
 
-For a local pipeline smoke test, create a 20-example sample from the held-out set and run
-three optimizer steps per arm:
+For a local pipeline smoke test (not a quality result), create a 20-example sample from the
+held-out set and run three optimizer steps per arm with an 8-token generation limit:
 
 ```bash
 python - <<'PY'
@@ -178,7 +181,7 @@ curate-eval-ablate \
   --filtered runs/ablation/data/filtered_train.jsonl \
   --filtered-synthetic runs/ablation/data/filtered_plus_synthetic.jsonl \
   --test-data runs/ablation/data/test_smoke20.jsonl \
-  --max-length 1560 --max-steps 3 --batch-size 1 \
+  --max-length 1560 --max-steps 3 --max-new-tokens 8 --batch-size 1 \
   --gradient-accumulation-steps 1 --run-lm-eval \
   --judge-url "$OPENAI_BASE_URL/chat/completions" \
   --judge-model qwen/qwen-2.5-72b-instruct \

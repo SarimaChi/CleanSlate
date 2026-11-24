@@ -13,9 +13,45 @@ from .io import read_examples, write_examples
 from .synthetic import generate
 
 
-def run_lm_eval(model_dir: Path, test_data: str, output_path: Path) -> None:
+def _run_lm_eval_on_cpu(
+    base_model: str,
+    adapter_dir: Path | None,
+    task_dir: Path,
+    output_path: Path,
+) -> None:
+    import torch
+    from lm_eval import simple_evaluate
+    from lm_eval.models.huggingface import HFLM
+    from lm_eval.tasks import TaskManager
+    from lm_eval.utils import handle_non_serializable
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    model = AutoModelForCausalLM.from_pretrained(base_model, torch_dtype=torch.float32)
+    if adapter_dir is not None:
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(model, str(adapter_dir))
+    model.to("cpu")
+    tokenizer = AutoTokenizer.from_pretrained(base_model)
+    lm = HFLM(pretrained=model, tokenizer=tokenizer, device="cpu", batch_size=1)
+    results = simple_evaluate(
+        model=lm,
+        tasks=["curate_eval"],
+        task_manager=TaskManager(include_path=[str(task_dir)]),
+        batch_size=1,
+        bootstrap_iters=0,
+        log_samples=False,
+    )
+    with output_path.open("w", encoding="utf-8") as handle:
+        json.dump(results, handle, indent=2, default=handle_non_serializable, ensure_ascii=False)
+
+
+def run_lm_eval(model_dir: Path, test_data: str, output_path: Path,
+                max_new_tokens: int = 256) -> None:
     import torch
 
+    if max_new_tokens <= 0:
+        raise ValueError("max_new_tokens must be positive")
     executable = shutil.which("lm_eval")
     if executable is None:
         raise RuntimeError("lm_eval is not installed; install the 'harness' extra: pip install -e '.[harness]'")
@@ -27,30 +63,36 @@ def run_lm_eval(model_dir: Path, test_data: str, output_path: Path) -> None:
         "test: data/test.jsonl",
         f'test: "{Path(test_data).resolve()}"',
     )
+    task_config = task_config.replace("max_gen_toks: 256", f"max_gen_toks: {max_new_tokens}")
     with tempfile.TemporaryDirectory(prefix="curate-eval-task-") as task_dir:
         task_dir_path = Path(task_dir)
         task_file = task_dir_path / "curate_eval.yaml"
         task_file.write_text(task_config, encoding="utf-8")
-        device = (
-            "cuda" if torch.cuda.is_available()
-            else "mps" if torch.backends.mps.is_available()
-            else "cpu"
-        )
-        model_args = f"pretrained={model_dir.resolve()},device={device}"
+        base_model = str(model_dir.resolve())
         adapter_config = model_dir / "adapter_config.json"
+        adapter_dir = None
         if adapter_config.is_file():
             with adapter_config.open(encoding="utf-8") as handle:
                 base_model = json.load(handle)["base_model_name_or_path"]
-            model_args = f"pretrained={base_model},peft={model_dir.resolve()},device={device}"
-        subprocess.run([
-            executable,
-            "--model", "hf",
-            "--model_args", model_args,
-            "--tasks", "curate_eval",
-            "--include_path", str(task_dir_path),
-            "--output_path", str(output_path.resolve()),
-            "--batch_size", "auto",
-        ], check=True)
+            adapter_dir = model_dir.resolve()
+
+        if torch.cuda.is_available():
+            device = "cuda"
+            dtype = "bfloat16" if torch.cuda.is_bf16_supported() else "float16"
+            model_args = f"pretrained={base_model},device={device},dtype={dtype}"
+            if adapter_dir is not None:
+                model_args += f",peft={adapter_dir}"
+            subprocess.run([
+                executable,
+                "--model", "hf",
+                "--model_args", model_args,
+                "--tasks", "curate_eval",
+                "--include_path", str(task_dir_path),
+                "--output_path", str(output_path.resolve()),
+                "--batch_size", "auto",
+            ], check=True)
+        else:
+            _run_lm_eval_on_cpu(base_model, adapter_dir, task_dir_path, output_path)
 
 
 def prepare_filtered_synthetic(
@@ -180,6 +222,7 @@ def run(
     max_length: int = 1560,
     max_steps: int = -1,
     gradient_accumulation_steps: int = 4,
+    max_new_tokens: int = 256,
 ) -> None:
     for arm in ("raw", "filtered"):
         if arm not in data_paths or not Path(data_paths[arm]).is_file():
@@ -198,10 +241,11 @@ def run(
         or max_steps == 0
         or max_steps < -1
         or gradient_accumulation_steps <= 0
+        or max_new_tokens <= 0
     ):
         raise ValueError(
             "epochs, learning_rate, batch_size, max_length, and gradient_accumulation_steps "
-            "must be positive; max_steps must be -1 or positive"
+            "must be positive; max_steps must be -1 or positive; max_new_tokens must be positive"
         )
 
     root = Path(output_dir)
@@ -228,6 +272,7 @@ def run(
         "per_device_train_batch_size": batch_size,
         "max_length": max_length,
         "max_steps": max_steps,
+        "max_new_tokens": max_new_tokens,
         "lora_rank": 16,
         "lora_alpha": 32,
         "lora_dropout": 0.05,
@@ -265,6 +310,7 @@ def run(
                 "--model", str(model_dir),
                 "--test-data", test_data,
                 "--output", str(metrics_path),
+                "--max-new-tokens", str(max_new_tokens),
             ]
             if judge_url:
                 command.extend(["--judge-url", judge_url, "--judge-model", judge_model])
@@ -273,7 +319,7 @@ def run(
                 results[name] = json.load(handle)["metrics"]
             if run_harness:
                 harness_path = arm_dir / "lm_eval_results.json"
-                run_lm_eval(model_dir, test_data, harness_path)
+                run_lm_eval(model_dir, test_data, harness_path, max_new_tokens)
                 results[name]["lm_eval_results"] = str(harness_path)
 
     summary = {
@@ -308,6 +354,7 @@ def main() -> None:
     parser.add_argument("--max-length", type=int, default=1560)
     parser.add_argument("--max-steps", type=int, default=-1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
+    parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--judge-url", default="")
     parser.add_argument("--judge-model", default="")
     parser.add_argument("--judge-api-key-env", default="OPENAI_API_KEY")
@@ -336,6 +383,7 @@ def main() -> None:
         max_length=args.max_length,
         max_steps=args.max_steps,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
+        max_new_tokens=args.max_new_tokens,
     )
 
 
