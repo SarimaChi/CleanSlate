@@ -1,0 +1,10 @@
+[console_scripts]
+curate-eval = curate_eval.cli:main
+curate-eval-ablate = curate_eval.ablation:main
+curate-eval-judge-labels = curate_eval.judge_validation:main
+curate-eval-publish = curate_eval.publish:main
+curate-eval-score = curate_eval.evaluate:main
+curate-eval-stackexchange = curate_eval.stackexchange:main
+curate-eval-synthesize = curate_eval.synthetic:main
+curate-eval-train = curate_eval.train:main
+curate-eval-wikipedia = curate_eval.wikipedia:main

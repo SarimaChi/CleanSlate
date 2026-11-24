@@ -1,0 +1,15 @@
+{
+  "input": 1901,
+  "empty_or_short_fields": 0,
+  "exact_duplicates": 0,
+  "near_duplicates": 0,
+  "language_mismatch": 0,
+  "heuristic_quality": 7,
+  "pii_scrubbed": 368,
+  "toxicity_or_bias": 1,
+  "judge_quality": 324,
+  "eval_contamination": 0,
+  "output": 1569,
+  "judge_mode": "local_heuristic_proxy",
+  "toxicity_mode": "lexicon_only"
+}

@@ -1,0 +1,179 @@
+Metadata-Version: 2.4
+Name: curate-eval
+Version: 0.1.0
+Summary: A reproducible instruction-data curation and ablation pipeline.
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: polars>=0.20
+Requires-Dist: langid>=1.1.6
+Provides-Extra: train
+Requires-Dist: datasets>=2.18; extra == "train"
+Requires-Dist: transformers>=4.40; extra == "train"
+Requires-Dist: peft>=0.10; extra == "train"
+Requires-Dist: accelerate>=0.29; extra == "train"
+Requires-Dist: torch>=2.2; extra == "train"
+Provides-Extra: eval
+Requires-Dist: sacrebleu>=2.4; extra == "eval"
+Requires-Dist: rouge-score>=0.1.2; extra == "eval"
+Requires-Dist: transformers>=4.40; extra == "eval"
+Requires-Dist: peft>=0.10; extra == "eval"
+Requires-Dist: torch>=2.2; extra == "eval"
+Provides-Extra: harness
+Requires-Dist: lm_eval>=0.4.4; extra == "harness"
+Provides-Extra: toxicity
+Requires-Dist: detoxify>=0.5; extra == "toxicity"
+Provides-Extra: test
+Requires-Dist: pytest>=8.0; extra == "test"
+Provides-Extra: all
+Requires-Dist: datasets>=2.18; extra == "all"
+Requires-Dist: transformers>=4.40; extra == "all"
+Requires-Dist: peft>=0.10; extra == "all"
+Requires-Dist: accelerate>=0.29; extra == "all"
+Requires-Dist: torch>=2.2; extra == "all"
+Requires-Dist: sacrebleu>=2.4; extra == "all"
+Requires-Dist: rouge-score>=0.1.2; extra == "all"
+Requires-Dist: lm_eval>=0.4.4; extra == "all"
+Requires-Dist: detoxify>=0.5; extra == "all"
+Requires-Dist: pytest>=8.0; extra == "all"
+
+# Curate & Evaluate
+
+An open-source, reproducible pipeline for turning noisy instruction-answer pairs into a
+curated dataset, validating automated judge labels, and comparing matched LoRA fine-tuning
+ablations. Core curation runs locally; judge-based filtering and synthesis use any
+OpenAI-compatible chat-completions endpoint.
+
+> **Research scaffold, not a pre-made dataset.** You provide corpus files and model choices.
+> The local judge proxy and safety lexicon are for smoke tests only; use a real judge and a
+> stronger safety model for published results. Review source licenses and personally
+> identifiable information before releasing data.
+
+## Setup
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[test]"
+pytest
+```
+
+For model training/evaluation, lm-evaluation-harness, and Detoxify, install
+`.[train,eval,harness,toxicity]`. Set the API key environment variable expected by your
+endpoint (default `OPENAI_API_KEY`) without putting credentials in data or source control.
+
+## 1. Prepare data
+
+Each record has `instruction`, optional `input`, and `output`. `question` and `answer` are
+accepted aliases. Input supports JSONL, CSV, or Parquet.
+
+The workspace includes a Nigerian Pidgin Wikipedia plaintext shard in `data/`. Convert it into
+instruction JSONL and run curation as follows:
+
+```bash
+curate-eval-wikipedia --input data/pcmwiki_01_of_01.txt.gz --output data/raw.jsonl
+curate-eval --input data/raw.jsonl --output data/filtered.jsonl \
+  --report data/filter-report.json --language pcm --trust-language-labels
+```
+
+This source contains 1,901 articles under CC BY-SA 3.0, not native Q&A. The converter creates
+template prompts (`Wetin be <title>?`) with article text as answers. `langid` does not reliably
+support Nigerian Pidgin, so the explicit option trusts the source's pinned `pcm` language label;
+it is not a language-ID result. See [`data/README.md`](data/README.md) for attribution and
+limitations.
+
+Alternatively, for a StackExchange archive, download a public data dump and unpack `Posts.xml`, then convert:
+
+```bash
+curate-eval-stackexchange --posts-xml Posts.xml --output data/raw.jsonl \
+  --site-url https://stackoverflow.com
+```
+
+This converter pairs questions with their accepted answers. It retains question text in memory,
+so for large StackExchange dumps, first extract a relevant site or subset of Posts.xml. It
+preserves source post URLs and user IDs in metadata for attribution; use the actual source
+site URL, not necessarily Stack Overflow.
+
+## 2. Curate
+
+```bash
+curate-eval \
+  --input data/raw.jsonl --output data/filtered.jsonl \
+  --report data/filter-report.json --language en \
+  --judge-url https://your-endpoint/v1/chat/completions \
+  --judge-model your-judge-model --eval-path data/test.jsonl
+```
+
+Stages, in order: empty-field removal, normalized exact deduplication, deterministic seeded
+MinHash candidate matching with Jaccard verification, `langid` detection, heuristic length/
+symbol/repetition checks, email/phone/URL scrubbing, lexicon safety screening (optionally
+Detoxify), LLM-as-judge scoring, then overlap decontamination against the supplied held-out
+evaluation examples. Every stage emits retained/removal counts. PII is scrubbed rather than
+discarding the whole example.
+
+Without `--judge-url`, a simple local heuristic proxy is used so the pipeline can be smoke
+tested; this is **not** LLM judging and must not be used to claim judge-based curation. Enable
+`--use-detoxify` to add model-based toxicity scoring. The built-in lexicons are intentionally
+small and are not a substitute for moderation or human review.
+
+## 3. Validate judge agreement
+
+```bash
+curate-eval-judge-labels export --input data/raw.jsonl --output data/to-label.jsonl --sample-size 150
+# Fill each human_label with 0 (reject) or 1 (keep), then:
+curate-eval-judge-labels score --labels data/to-label.jsonl \
+  --judge-url https://your-endpoint/v1/chat/completions --judge-model your-judge-model
+```
+
+The report uses Cohen's kappa after thresholding judge scores. Freeze the labeling rubric and
+threshold before annotation; report the number labeled and class balance alongside kappa.
+
+## 4. Generate and filter synthetic data
+
+```bash
+curate-eval-synthesize --seeds data/filtered.jsonl --output data/synthetic.jsonl \
+  --count 1000 --judge-url https://your-endpoint/v1/chat/completions \
+  --judge-model your-judge-model --eval-path data/test.jsonl
+```
+
+Synthesis is followed by the same curation stages. Combine the kept synthetic records with
+the filtered seed file to create the third ablation input.
+
+## 5. Train and evaluate ablations
+
+The same model, seed, LoRA rank/alpha/dropout, optimizer settings, epochs, and training
+arguments are used in each arm:
+
+```bash
+curate-eval-ablate --raw data/raw.jsonl --filtered data/filtered.jsonl \
+  --filtered-synthetic data/filtered_plus_synthetic.jsonl \
+  --model your-base-model --test-data data/test.jsonl --output-dir runs/ablation \
+  --judge-url https://your-endpoint/v1/chat/completions --judge-model your-judge-model
+```
+
+Scores include ROUGE-L, SacreBLEU, and held-out reference perplexity. If configured, the
+judge also reports the model's win/tie-adjusted preference rate against the reference answer.
+The ablation command also runs lm-evaluation-harness for each arm using the custom task config
+in `lm_eval/tasks/curate_eval/`. This task measures exact-match answers and is a starter
+benchmark, not a substitute for the generative metrics above.
+
+## 6. Publish
+
+Review the upstream license and dataset terms, fill in run-specific details in
+[`dataset-card.md`](dataset-card.md), then authenticate with `huggingface-cli login` and run:
+
+```bash
+curate-eval-publish --data data/filtered.jsonl --repo-id YOUR_NAME/YOUR_DATASET \
+  --card dataset-card.md
+```
+
+## Limitations
+
+- Language identification depends on `langid`; it may misclassify code, short text, and
+  underrepresented languages such as Nigerian Pidgin or Yoruba. Change `--language` only after
+  checking a manually reviewed language sample.
+- The default technical source is English StackExchange. Low-resource-language use requires
+  selecting a suitable source and validating language identification and judge quality first.
+- The provided overlap decontamination is conservative n-gram overlap filtering, not semantic
+  proof of independence. Keep the final test set private and report its construction.
+- Full training/evaluation requires appropriate hardware, compatible model licenses, and
+  the optional dependencies. The smoke tests do not establish model-quality improvements.

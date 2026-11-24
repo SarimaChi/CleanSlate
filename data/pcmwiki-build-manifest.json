@@ -1,0 +1,39 @@
+{
+  "language": "pcmwiki",
+  "generated_utc": "2026-10-14T02:59:58.973628+00:00",
+  "expected_shards": 1,
+  "published_shards": 1,
+  "published_archives": 1,
+  "present_shards": [
+    1
+  ],
+  "missing_shards": [],
+  "incomplete_shards": [],
+  "complete": true,
+  "roots": [
+    {
+      "root_shard": 1,
+      "complete": true,
+      "files": [
+        "pcmwiki_01_of_01.txt.gz"
+      ],
+      "successful_leaves": [
+        {
+          "file": "pcmwiki_01_of_01.txt.gz",
+          "segment": "root",
+          "sources": [
+            {
+              "file": "pcmwiki-latest-pages-articles.xml.bz2",
+              "min_page_id": null,
+              "max_page_id": null
+            }
+          ],
+          "bytes": 1292485,
+          "articles": 1901
+        }
+      ],
+      "failed_fragments": [],
+      "download_failures": []
+    }
+  ]
+}
